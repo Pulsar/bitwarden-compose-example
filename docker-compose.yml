@@ -1,0 +1,292 @@
+version: '3.7'
+services:
+  # Reverse proxy ##############################################
+  nginx-proxy:
+    container_name: proxy-service
+    image: jwilder/nginx-proxy:${PROXY_VERSION}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/tmp/docker.sock:ro"
+      - certs-volume:/etc/nginx/certs
+      - dhprm-volume:/etc/nginx/dhparam
+      - vhost-volume:/etc/nginx/vhost.d
+      - htmls-volume:/usr/share/nginx/html
+      - confd-volume:/etc/nginx/conf.d   
+    labels:
+      - com.github.jrcs.letsencrypt_nginx_proxy_companion.nginx_proxy
+    networks:
+      - proxy-net
+  # nginx-proxy-letsencrypt:
+  #   container_name: letsencrypt-service
+  #   image: jrcs/letsencrypt-nginx-proxy-companion:${LETSENCRYPT_VERSION}
+  #   restart: unless-stopped
+  #   volumes:
+  #     - "/var/run/docker.sock:/var/run/docker.sock:ro"
+  #     - certs-volume:/etc/nginx/certs
+  #     - vhost-volume:/etc/nginx/vhost.d
+  #     - htmls-volume:/usr/share/nginx/html
+  #   networks:
+  #     - proxy-net
+  #   depends_on:
+  #     - nginx-proxy
+  
+  # Bitwarden ##################################################
+  bitwarden-proxy:
+    container_name: bitwarden-proxy
+    image: bitwarden/nginx:${BITWARDEN_VERSION}
+    build:
+      context: bitwarden/nginx
+      dockerfile: Dockerfile
+      args:
+        nginx_version: 1.16
+    restart: unless-stopped
+    ports:          # Should not be exposed when behind nginx-proxy (for testing only)
+      - "8080:8080" # http
+      - "8443:8443" # https
+    environment:
+      # Reverse proxy variables
+      - VIRTUAL_HOST=bitwarden.${BASE_DOMAIN}
+      - VIRTUAL_PORT=8443
+      - VIRTUAL_PROTO=https
+      - CERT_NAME=${BASE_DOMAIN}
+      # Letsencrypt variables
+      - LETSENCRYPT_HOST=bitwarden.${BASE_DOMAIN}
+      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
+      # Bitwarden
+      - BW_UID=1000
+      - BW_GID=1000
+      - BW_HOST=bitwarden.${BASE_DOMAIN}
+      - BW_TLS_PATH=/etc/certs
+    volumes:
+      - certs-volume:/etc/certs # certificates
+      - ${BASE_DIR}/bitwarden/logs/nginx:/var/log/nginx
+    networks:
+      proxy-net:
+        aliases:
+          - bitwarden.${BASE_DOMAIN}
+      bitwarden-net:
+        aliases:
+          - nginx
+    depends_on:
+      - bitwarden-web
+      - bitwarden-admin
+      - bitwarden-api
+      - bitwarden-identity
+
+  bitwarden-db:
+    container_name: bitwarden-db
+    image: bitwarden/mssql:${BITWARDEN_VERSION}
+    restart: unless-stopped
+    environment:
+      # Bitwarden
+      - ACCEPT_EULA=Y
+      - MSSQL_PID=Express
+      - SA_PASSWORD=${SA_PASSWORD}
+      - LOCAL_UID=1000
+      - LOCAL_GID=1000
+    volumes:
+      - ${BASE_DIR}/bitwarden/mssql/data:/var/opt/mssql/data
+      - ${BASE_DIR}/bitwarden/mssql/backups:/etc/bitwarden/mssql/backups
+      - ${BASE_DIR}/bitwarden/logs/mssql:/var/opt/mssql/log
+    networks:
+      bitwarden-net:
+        aliases:
+          - mssql
+
+  bitwarden-web:
+    container_name: bitwarden-web
+    image: bitwarden/web:${BITWARDEN_WEB_VERSION}
+    restart: unless-stopped
+    volumes:
+      - ${BASE_DIR}/bitwarden/web:/etc/bitwarden/web
+    environment:
+      # Bitwarden
+      - LOCAL_UID=1000
+      - LOCAL_GID=1000
+    env_file:
+      - global.env
+    networks:
+      bitwarden-net:
+        aliases:
+          - web
+
+  bitwarden-attachments:
+    image: bitwarden/attachments:${BITWARDEN_VERSION}
+    container_name: bitwarden-attachments
+    restart: unless-stopped
+    volumes:
+      - ${BASE_DIR}/bitwarden/core/attachments:/etc/bitwarden/core/attachments
+    environment:
+      # Bitwarden
+      - LOCAL_UID=1000
+      - LOCAL_GID=1000
+    env_file:
+      - global.env
+    networks:
+      bitwarden-net:
+        aliases:
+          - attachments
+
+  bitwarden-api:
+    container_name: bitwarden-api
+    image: bitwarden/api:${BITWARDEN_VERSION}
+    restart: unless-stopped
+    volumes:
+      - ${BASE_DIR}/bitwarden/ca-certificates:/etc/bitwarden/ca-certificates
+      - ${BASE_DIR}/bitwarden/core:/etc/bitwarden/core
+      - ${BASE_DIR}/bitwarden/logs/api:/etc/bitwarden/logs
+    environment:
+      # Bitwarden
+      - LOCAL_UID=1000
+      - LOCAL_GID=1000
+    env_file:
+      - global.env
+      - bitwarden/env/global.override.env
+    networks:
+      proxy-net:
+      bitwarden-net:
+        aliases:
+          - api
+
+  bitwarden-identity:
+    container_name: bitwarden-identity
+    image: bitwarden/identity:${BITWARDEN_VERSION}
+    restart: unless-stopped
+    volumes:
+      - ${BASE_DIR}/bitwarden/ca-certificates:/etc/bitwarden/ca-certificates
+      - ${BASE_DIR}/bitwarden/core:/etc/bitwarden/core
+      - ${BASE_DIR}/bitwarden/identity:/etc/bitwarden/identity
+      - ${BASE_DIR}/bitwarden/logs/identity:/etc/bitwarden/logs
+    environment:
+      # Bitwarden
+      - LOCAL_UID=1000
+      - LOCAL_GID=1000
+    env_file:
+      - global.env
+      - bitwarden/env/global.override.env
+    networks:
+      proxy-net:
+      bitwarden-net:
+        aliases:
+          - identity
+
+  bitwarden-admin:
+    container_name: bitwarden-admin
+    image: bitwarden/admin:${BITWARDEN_VERSION}
+    restart: unless-stopped
+    depends_on:
+      - bitwarden-db
+    volumes:
+      - ${BASE_DIR}/bitwarden/ca-certificates:/etc/bitwarden/ca-certificates
+      - ${BASE_DIR}/bitwarden/core:/etc/bitwarden/core
+      - ${BASE_DIR}/bitwarden/logs/admin:/etc/bitwarden/logs
+    environment:
+      # Bitwarden
+      - LOCAL_UID=1000
+      - LOCAL_GID=1000
+    env_file:
+      - global.env
+      - bitwarden/env/global.override.env
+    networks:
+      proxy-net:
+      bitwarden-net:
+        aliases:
+          - admin
+
+  bitwarden-icons:
+    container_name: bitwarden-icons
+    image: bitwarden/icons:${BITWARDEN_VERSION}
+    restart: unless-stopped
+    volumes:
+      - ${BASE_DIR}/bitwarden/ca-certificates:/etc/bitwarden/ca-certificates
+      - ${BASE_DIR}/bitwarden/logs/icons:/etc/bitwarden/logs
+    environment:
+      # Bitwarden
+      - LOCAL_UID=1000
+      - LOCAL_GID=1000
+    env_file:
+      - global.env
+    networks:
+      proxy-net:
+      bitwarden-net:
+        aliases:
+          - icons
+
+  bitwarden-notifications:
+    container_name: bitwarden-notifications
+    image: bitwarden/notifications:${BITWARDEN_VERSION}
+    restart: unless-stopped
+    volumes:
+      - ${BASE_DIR}/bitwarden/ca-certificates:/etc/bitwarden/ca-certificates
+      - ${BASE_DIR}/bitwarden/logs/notifications:/etc/bitwarden/logs
+    environment:
+      # Bitwarden
+      - LOCAL_UID=1000
+      - LOCAL_GID=1000
+    env_file:
+      - global.env
+      - bitwarden/env/global.override.env
+    networks:
+      proxy-net:
+      bitwarden-net:
+        aliases:
+          - notifications
+
+  bitwarden-events:
+    container_name: bitwarden-events
+    image: bitwarden/events:${BITWARDEN_VERSION}
+    restart: unless-stopped
+    volumes:
+      - ${BASE_DIR}/bitwarden/ca-certificates:/etc/bitwarden/ca-certificates
+      - ${BASE_DIR}/bitwarden/logs/events:/etc/bitwarden/logs
+    environment:
+      # Bitwarden
+      - LOCAL_UID=1000
+      - LOCAL_GID=1000
+    env_file:
+      - global.env
+      - bitwarden/env/global.override.env
+    networks:
+      proxy-net:
+      bitwarden-net:
+        aliases:
+          - events
+
+volumes: #-----------------------------------------------
+  certs-volume:
+    driver_opts:
+      type: none
+      device: ${BASE_DIR}/proxy/certs #NOTE needs full path (~ doesn't work)
+      o: bind
+  dhprm-volume:
+    driver_opts:
+      type: none
+      device: ${BASE_DIR}/proxy/dhparam
+      o: bind
+  vhost-volume:
+    driver_opts:
+      type: none
+      device: ${BASE_DIR}/proxy/vhost
+      o: bind
+  htmls-volume:
+    driver_opts:
+      type: none
+      device: ${BASE_DIR}/proxy/htmls
+      o: bind
+  confd-volume:
+    driver_opts:
+      type: none
+      device: ${BASE_DIR}/proxy/confd
+      o: bind
+  
+networks: #----------------------------------------------
+  proxy-net:
+    name: proxy-net
+    driver: bridge
+  bitwarden-net:
+    name: bitwarden-net
+    driver: bridge
+    internal: true
