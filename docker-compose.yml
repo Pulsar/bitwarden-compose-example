@@ -48,7 +48,7 @@ services:
       - "8443:8443" # https
     environment:
       # Reverse proxy variables
-      - VIRTUAL_HOST=bitwarden.${BASE_DOMAIN}
+      - VIRTUAL_HOST=bitwarden.${BASE_DOMAIN},botwarden.${BASE_DOMAIN},botwarden.home
       - VIRTUAL_PORT=8443
       - VIRTUAL_PROTO=https
       - CERT_NAME=${BASE_DOMAIN}
